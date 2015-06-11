@@ -1,2 +1,4 @@
 # TrendCalculus
-Fast bottom up trend reversal detection algorithm.
+Fast bottom up streaming multiscale trend reversal detection algorithm.
+
+* the public repo is hosted on https://bitbucket.org/bytesumo/trendcalculus-public
