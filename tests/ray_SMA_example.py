@@ -3,8 +3,23 @@ import csv
 import ray
 import numpy as np
 
+# retrieve or initialise BufferArray actor references, offsets
+@ray.remote
+class lookup(object):
+    def __init__(self):
+        #define
+        self.series = {}
 
-# create some ray actor classes, and update functions. Later decorate figure out how to scale up
+    def get_ref(self, seriesname):
+        if seriesname in self.series:
+            ref = self.series[seriesname]
+        else:       
+            # this is a key create a new actor
+            ref = StateArrayBuffer.remote()
+            self.series[seriesname] = ref
+        return ref
+
+
 @ray.remote
 class StateArrayBuffer(object):
 
@@ -70,14 +85,19 @@ class StateArrayBuffer(object):
 ray.init()
 assert ray.is_initialized() == True
 
+###########
 # kick off a stream to test on 
 # this example expects the following schema as csv lines
 #OrderedDict([('Instrument', 'gbpcad'), ('DateTime', '20190602 170300'), ('Close', '1.707130')])
+##########
 
 inputfile = "../examples/data/gbpcad.csv"
 
-# instantiate my buffer actor
-all_windows = StateArrayBuffer.remote()
+# instantiate my lookup for the timeseries names
+tslookup = lookup.remote()
+
+#all_windows = StateArrayBuffer.remote()
+
 max_tf = 20
 
 from csv import DictReader
@@ -91,14 +111,18 @@ with open(inputfile, 'r') as read_obj:
     # iterate over each line as a ordered dictionary
     for row in csv_dict_reader:
 
+        #see which actor objectref to use for this event
+        stream_ref = ray.get(tslookup.get_ref.remote(row['Instrument']))
+
         # submit our new record to update the ray state_buffer actor
-        ray.get(all_windows.update_state.remote(row, max_tf))
-        matrix = ray.get(all_windows.get_state.remote())
+        ray.get(stream_ref.update_state.remote(row, max_tf))
+        # tfmatrix = ray.get(all_windows.get_state.remote())
 
+        sma = ray.get(all_windows.get_tf(max_tf).remote())
 
-        print("test: ", row['Instrument'], row['DateTime'], row['Close'], sep=",")
-        print('offset', 'timeframe', 'rollingsum', 'SMA', sep="\t")
-        print('\n'.join(['\t'.join([str(cell) for cell in row]) for row in matrix]))
+        print("test: ", row['Instrument'], row['DateTime'], row['Close'], sma, sep=",")
+        #print('offset', 'timeframe', 'rollingsum', 'SMA', sep="\t")
+        #print('\n'.join(['\t'.join([str(cell) for cell in row]) for row in tfmatrix]))
 
 ray.shutdown()
 assert ray.is_initialized() == False
