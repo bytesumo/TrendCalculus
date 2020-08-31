@@ -27,7 +27,7 @@ class StateArrayBuffer(object):
         return self.state_array[state_array['timeframe'] == time_frame]
 
 @ray.remote
-def IncrementalAggregate(mybuffer, EventRecord, raxTimeFrame):
+def IncrementalAggregate(mybuffer, EventRecord, MaxTimeFrame):
     # This function should be called per event, on an ordered stream of events
     # Note the EventRecord should have a schema, like this example
     #    OrderedDict([('Instrument', 'gbpcad'), ('DateTime', '20190602 170000'), ('Close', '1.707180')])
@@ -60,16 +60,16 @@ def IncrementalAggregate(mybuffer, EventRecord, raxTimeFrame):
 ray.init()
 assert ray.is_initialized() == True
 
-
 # instantiate my buffer actor
 
 try:
-    mybuff = StateArrayBuffer.remote()
+    mybuff = StateArrayBuffer.remote(0)
 except Exception:
     print("Error initialising mybuff = StateArrayBuffer.remote ")
 
-mytf = 20
+# hardcode our maxtimeframe, which you might consider the max rolling window
 
+mytf = 20
 
 
 # kick off a stream to test on 
@@ -88,8 +88,11 @@ try:
         # iterate over each line as a ordered dictionary
         for row in csv_dict_reader:
             # row variable is a dictionary that represents a row in csv
-            print(row)
-
+            upd_ref = IncrementalAggregate(mybuff, row, mytf).remote()
+            ray.get(upd_ref)
+            agg_ref = StateArrayBuffer.at_tf(mytf).remote(mybuffer)
+            agg = ray.get(agg_ref) 
+            print("test: ", row['Instrument'], row['DateTime'], row['Close'], agg)
 except Exception:
     print("error iterating the csv parsed data")
 
