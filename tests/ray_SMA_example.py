@@ -3,23 +3,8 @@ import csv
 import ray
 import numpy as np
 
-# retrieve or initialise BufferArray actor references, offsets
-@ray.remote
-class lookup(object):
-    def __init__(self):
-        #define
-        self.series = {}
 
-    def get_ref(self, seriesname):
-        if seriesname in self.series:
-            ref = self.series[seriesname]
-        else:       
-            # this is a key create a new actor
-            ref = StateArrayBuffer.remote()
-            self.series[seriesname] = ref
-        return ref
-
-
+# create some ray actor classes, and update functions. Later decorate figure out how to scale up
 @ray.remote
 class StateArrayBuffer(object):
 
@@ -29,75 +14,60 @@ class StateArrayBuffer(object):
         self.buffer_schema = np.dtype({'names':('offset', 'timeframe', 'rollingsum', 'SMA'),
                                        'formats':(np.uint64, np.uint16, np.float64, np.float64)})
         # here we create the buffer object
-        self.state_array = np.zeros(1, dtype=self.buffer_schema)	
+        state_array = np.zeros(1, dtype=self.buffer_schema)
+        self.state_array_ref = ray.put(state_array)	
         # note the offset counter is initialised at zero
 
     def get_state(self):
-        return self.state_array
+        state_array = ray.get(self.state_array_ref)
+        return state_array
 
     def update_state(self, EventRecord, MaxTimeFrame):
-        tmp_state_array = self.state_array.copy()
-        tmp_state_array['offset'] += 1
+        old_state_array = ray.get(self.state_array_ref)
+        tmp_state_array = old_state_array.copy()
+        offset = old_state_array['offset'][0:2].max(axis = 0) + 1
+        tmp_state_array['offset'] = offset
         tmp_state_array['timeframe'] += 1
         tmp_state_array['rollingsum'] += float(EventRecord['Close'])
         tmp_state_array['SMA'] = tmp_state_array['rollingsum']/tmp_state_array['timeframe']
-
+        # initialise a new zero timeframe 
         tf_zero = np.zeros(1, dtype=self.buffer_schema)
+        # append the recalc of the state, truncated to max time frame
         new_state = np.concatenate((tf_zero, tmp_state_array[tmp_state_array['timeframe'] <= MaxTimeFrame ]))
-
-        self.state_array = new_state
+        # save the new array, and store the reference here in the actor
+        self.state_array_ref = ray.put(new_state)
         return 
 
     def get_tf(self, time_frame):
-        return self.state_array[state_array['timeframe'] == time_frame]
+        curr_state_array = ray.get(self.state_array_ref)
+        tmp_state_array = curr_state_array.copy()
+        just_requested_tf = tmp_state_array[tmp_state_array['timeframe'] == int(time_frame)]
+        return just_requested_tf
 
-#@ray.remote
-#def IncrementalAggregate(mybuffer, EventRecord, MaxTimeFrame):
-#    # This function should be called per event, on an ordered stream of events
-#    # Note the EventRecord should have a schema, like this example
-#    #    OrderedDict([('Instrument', 'gbpcad'), ('DateTime', '20190602 170000'), ('Close', '1.707180')])
-#    # For this event fetch the state for this Instrument. If it doesn't exist, it gets initialised. 
-#
-#    state = ray.get(StateArrayBuffer(mybuffer).get_state).remote()
-#
-#    # the state is a numpy array, the max rows should be limited to MaxTimeFrame
-#    # copy the existing state to a new array which we'll update inplace using values in the event record
-#
-#    tf_zero = state[0].copy    
-#
-#    # update the state, increment the offset, timeframe for each row, add Close to RollingSum
-#    state['offset'] += 1
-#    state['timeframe'] += 1
-#    state['rollingsum'] += EventRecord['Close']
-#    state['SMA'] = state['rollingsum']/state['tf']
-#
-#    new_state = np.concatenate(tf_zero, state[ state['timeframe'] <= MaxTimeFrame ])
-#
-#    ray.put(StateArrayBuffer(mybuffer).update_state(new_state)).remote()
-#    return
-    
-# with this functions, manage the buffer to calculate the SMAs
+    def get_all_tf(self):
+        curr_state_array = ray.get(self.state_array_ref)
+        all_tfs = curr_state_array['SMA'][2:-1]
+        offset = curr_state_array['offset'][1]
+        return offset, all_tfs
 
-
-
+    def get_offset(self, time_frame):
+        curr_state_array = ray.get(self.state_array_ref)
+        curr_offset = curr_state_array['offset'][1]
+        return curr_offset
 # start ray
 
 ray.init()
 assert ray.is_initialized() == True
 
-###########
 # kick off a stream to test on 
 # this example expects the following schema as csv lines
 #OrderedDict([('Instrument', 'gbpcad'), ('DateTime', '20190602 170300'), ('Close', '1.707130')])
-##########
+#        curr_max_tf = tmp_state_array['offset'].max(axis=0)
 
 inputfile = "../examples/data/gbpcad.csv"
 
-# instantiate my lookup for the timeseries names
-tslookup = lookup.remote()
-
-#all_windows = StateArrayBuffer.remote()
-
+# instantiate my buffer actor
+all_windows = StateArrayBuffer.remote()
 max_tf = 20
 
 from csv import DictReader
@@ -111,19 +81,16 @@ with open(inputfile, 'r') as read_obj:
     # iterate over each line as a ordered dictionary
     for row in csv_dict_reader:
 
-        #see which actor objectref to use for this event
-        stream_ref = ray.get(tslookup.get_ref.remote(row['Instrument']))
-
         # submit our new record to update the ray state_buffer actor
-        ray.get(stream_ref.update_state.remote(row, max_tf))
-        # tfmatrix = ray.get(all_windows.get_state.remote())
-
-        sma = ray.get(all_windows.get_tf(max_tf).remote())
-
-        print("test: ", row['Instrument'], row['DateTime'], row['Close'], sma, sep=",")
+        ray.get(all_windows.update_state.remote(row, max_tf))
+        matrix = ray.get(all_windows.get_state.remote())
+        sma_tf = ray.get(all_windows.get_tf.remote(max_tf))
+        offset, sma_all = ray.get(all_windows.get_all_tf.remote())
+        sma_all_csv = ','.join(['%.5f' % num for num in sma_all])
+        
+        print(row['Instrument'], row['DateTime'], row['Close'], str(offset), sma_all_csv, sep=",")
         #print('offset', 'timeframe', 'rollingsum', 'SMA', sep="\t")
-        #print('\n'.join(['\t'.join([str(cell) for cell in row]) for row in tfmatrix]))
+        #print('\n'.join(['\t'.join([str(cell) for cell in row]) for row in matrix]))
 
 ray.shutdown()
 assert ray.is_initialized() == False
-
